@@ -1,9 +1,5 @@
 // PMW3610 Low-Power Mouse Sensor Driver (Rust/Embassy/RMK port)
 //
-// Copyright 2024 Google LLC
-// SPDX-License-Identifier: Apache-2.0
-//
-// This is a driver for the PixArt PMW3610 low-power mouse sensor.
 // Ported from the Zephyr driver implementation:
 // https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.c
 //
