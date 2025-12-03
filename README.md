@@ -26,27 +26,45 @@ use embassy_nrf::gpio::{Flex, Input, Output, Level, Pull, OutputDrive};
 
 // Initialize PMW3610 mouse sensor
 let pmw3610_config = Pmw3610Config {
-	res_cpi: 800,
-	smart_mode: false,
-	force_awake: false,
-	swap_xy: false,
-	invert_y: false,
-	invert_x: false,
-	..Default::default()
+    res_cpi: 800,
+    smart_mode: false,
+    force_awake: false,
+    swap_xy: false,
+    invert_y: false,
+    invert_x: false,
+    ..Default::default()
 };
-let pmw3610_sck = Output::new(p.P0_05, embassy_nrf::gpio::Level::High, embassy_nrf::gpio::OutputDrive::Standard);
+let pmw3610_sck = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
 let pmw3610_sdio = Flex::new(p.P0_04);
-let pmw3610_cs = Output::new(p.P0_09, embassy_nrf::gpio::Level::High, embassy_nrf::gpio::OutputDrive::Standard);
-let pmw3610_irq = Input::new(p.P0_02, embassy_nrf::gpio::Pull::Up);
-let mut pmw3610_device = Pmw3610Device::new(pmw3610_sck, pmw3610_sdio, pmw3610_cs, Some(pmw3610_irq), pmw3610_config);
+let pmw3610_cs = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
+let pmw3610_irq = Input::new(p.P0_02, Pull::Up);
+let mut pmw3610_device = Pmw3610Device::new(
+    pmw3610_sck, pmw3610_sdio, pmw3610_cs, Some(pmw3610_irq), pmw3610_config
+);
 
 // Add to the run_devices! macro
 run_devices! (
-    (matrix, adc_device, pmw3610_device) => EVENT_CHANNEL,
+    (matrix, pmw3610_device) => EVENT_CHANNEL,
 ),
 ```
 
-### Custom HAL Implementation
+### 3. Add an InputProcessor to handle the events
+
+`Pmw3610Device` returns `Event::Joystick` events. You need an `InputProcessor` to convert these into `MouseReport`.
+
+For simple mouse movement, use `JoystickProcessor`:
+
+```rust
+use rmk::input_device::joystick::JoystickProcessor;
+let mut joystick_proc = JoystickProcessor::new([[1, 0], [0, 1]], [0, 0], 4, &keymap);
+
+// Add processor to the chain
+run_processor_chain! {
+    EVENT_CHANNEL => [joystick_proc],
+},
+```
+
+## Custom HAL Implementation
 
 To use with a different HAL, implement the `BidirectionalPin` trait:
 

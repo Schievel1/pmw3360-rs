@@ -17,7 +17,7 @@ default = []
 embassy-nrf = ["dep:embassy-nrf"]
 
 # RMK integration (optional)
-rmk = ["dep:rmk", "dep:usbd-hid"]
+rmk = ["dep:rmk"]
 
 [dependencies]
 defmt = "1.0"
@@ -32,4 +32,3 @@ embassy-nrf = { version = "0.8", default-features = false, optional = true, feat
 
 # Optional RMK integration
 rmk = { version = "0.8", optional = true }
-usbd-hid = { version = "0.9", optional = true }

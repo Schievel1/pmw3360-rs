@@ -614,11 +614,8 @@ where
 #[cfg(feature = "rmk")]
 mod rmk_integration {
     use super::*;
-    use rmk::channel::KEYBOARD_REPORT_CHANNEL;
     use rmk::event::{Axis, AxisEvent, AxisValType, Event};
-    use rmk::hid::Report;
     use rmk::input_device::InputDevice;
-    use usbd_hid::descriptor::MouseReport;
 
     /// Initialization state for the device
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +627,10 @@ mod rmk_integration {
     }
 
     /// PMW3610 as an InputDevice for RMK
+    ///
+    /// This device returns `Event::Joystick` events with relative X/Y movement.
+    /// Use an `InputProcessor` (e.g., `JoystickProcessor` or `ScrollLayerProcessor`)
+    /// to convert these events into `MouseReport` and send to the host.
     pub struct Pmw3610Device<SCK, SDIO, CS, MOTION>
     where
         SCK: OutputPin,
@@ -714,17 +715,14 @@ mod rmk_integration {
     {
         async fn read_event(&mut self) -> Event {
             loop {
-                // Wait for polling interval
                 Timer::after(self.poll_interval).await;
 
-                // Try to initialize if not ready yet
                 if self.init_state != InitState::Ready {
                     if !self.try_init().await {
                         continue;
                     }
                 }
 
-                // Only read if motion is pending (motion GPIO low) or no motion GPIO configured
                 if !self.sensor.motion_pending() {
                     continue;
                 }
@@ -732,24 +730,6 @@ mod rmk_integration {
                 match self.sensor.read_motion().await {
                     Ok(motion) => {
                         if motion.dx != 0 || motion.dy != 0 {
-                            // Clamp values to i8 range for mouse report
-                            let x = motion.dx.clamp(-127, 127) as i8;
-                            let y = motion.dy.clamp(-127, 127) as i8;
-
-                            let mouse_report = MouseReport {
-                                buttons: 0,
-                                x,
-                                y,
-                                wheel: 0,
-                                pan: 0,
-                            };
-
-                            // Send mouse report directly
-                            KEYBOARD_REPORT_CHANNEL
-                                .send(Report::MouseReport(mouse_report))
-                                .await;
-
-                            // Return joystick event for compatibility with processor chain
                             return Event::Joystick([
                                 AxisEvent {
                                     typ: AxisValType::Rel,
