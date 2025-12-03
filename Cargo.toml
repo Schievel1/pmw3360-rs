@@ -1,0 +1,35 @@
+[package]
+name = "pmw3610-rs"
+version = "0.1.0"
+authors = ["kot149"]
+description = "PMW3610 Low-Power Mouse Sensor Driver for Embassy/RMK"
+repository = "https://github.com/kot149/pmw3610-rs"
+readme = "README.md"
+edition = "2024"
+license = "Apache-2.0"
+keywords = ["pmw3610", "mouse", "sensor", "embedded", "no_std"]
+categories = ["embedded", "no-std", "hardware-support"]
+
+[features]
+default = []
+
+# HAL implementations (optional, choose based on your platform)
+embassy-nrf = ["dep:embassy-nrf"]
+
+# RMK integration (optional)
+rmk = ["dep:rmk", "dep:usbd-hid"]
+
+[dependencies]
+defmt = "1.0"
+embedded-hal = "1.0"
+embassy-time = { version = "0.5", features = ["defmt"] }
+
+# Optional HAL implementations
+embassy-nrf = { version = "0.8", default-features = false, optional = true, features = [
+    "gpiote",
+    "time",
+] }
+
+# Optional RMK integration
+rmk = { version = "0.8", optional = true }
+usbd-hid = { version = "0.9", optional = true }
