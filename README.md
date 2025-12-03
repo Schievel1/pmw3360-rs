@@ -18,10 +18,13 @@ https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a65
 pmw3610-rs = { git = "https://github.com/kot149/pmw3610-rs", branch = "main", features = ["embassy-nrf", "rmk"] }
 ```
 
+`embassy-nrf` feature enables implementation of `BidirectionalPin` trait for `embassy_nrf::gpio::Flex` pin. Additional implementation is required for other platforms.
+`rmk` feature enables `Pmw3610Device` with `InputDevice` trait for RMK.
+
 ### 2. Initialize the sensor
 
 ```rust
-use pmw3610_rs::{Pmw3610Config, Pmw3610Device};
+use pmw3610_rs::{BitBangSpiBus, Pmw3610Config, Pmw3610Device};
 use embassy_nrf::gpio::{Flex, Input, Output, Level, Pull, OutputDrive};
 
 // Initialize PMW3610 mouse sensor
@@ -34,12 +37,19 @@ let pmw3610_config = Pmw3610Config {
     invert_x: false,
     ..Default::default()
 };
+
+// Create GPIO pins
 let pmw3610_sck = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
 let pmw3610_sdio = Flex::new(p.P0_04);
 let pmw3610_cs = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
 let pmw3610_irq = Input::new(p.P0_02, Pull::Up);
+
+// Create the bit-banging SPI bus
+let pmw3610_spi = BitBangSpiBus::new(pmw3610_sck, pmw3610_sdio);
+
+// Create the sensor device
 let mut pmw3610_device = Pmw3610Device::new(
-    pmw3610_sck, pmw3610_sdio, pmw3610_cs, Some(pmw3610_irq), pmw3610_config
+    pmw3610_spi, pmw3610_cs, Some(pmw3610_irq), pmw3610_config
 );
 
 // Add to the run_devices! macro
@@ -56,7 +66,7 @@ For simple mouse movement, use `JoystickProcessor`:
 
 ```rust
 use rmk::input_device::joystick::JoystickProcessor;
-let mut joystick_proc = JoystickProcessor::new([[1, 0], [0, 1]], [0, 0], 4, &keymap);
+let mut joystick_proc = JoystickProcessor::new([[1, 0], [0, 1]], [0, 0], 1, &keymap);
 
 // Add processor to the chain
 run_processor_chain! {
@@ -66,10 +76,12 @@ run_processor_chain! {
 
 ## Custom HAL Implementation
 
-To use with a different HAL, implement the `BidirectionalPin` trait:
+### Using a different HAL with bit-banging
+
+To use with a different HAL, implement the `BidirectionalPin` trait for the SDIO pin:
 
 ```rust
-use pmw3610_rs::BidirectionalPin;
+use pmw3610_rs::{BidirectionalPin, BitBangSpiBus, Pmw3610, Pmw3610Config};
 
 struct MyFlexPin {
     // Your pin implementation
@@ -97,6 +109,23 @@ impl BidirectionalPin for MyFlexPin {
         true
     }
 }
+
+// Then use it with BitBangSpiBus
+let spi_bus = BitBangSpiBus::new(my_sck_pin, my_sdio_pin);
+let sensor = Pmw3610::new(spi_bus, cs_pin, motion_pin, config);
+```
+
+### Using hardware SPI
+
+If your MCU's SPI peripheral supports half-duplex mode, you can use it directly instead of bit-banging:
+
+```rust
+use pmw3610_rs::{Pmw3610, Pmw3610Config};
+use embedded_hal::spi::SpiBus;
+
+// Use your hardware SPI that implements SpiBus
+let hardware_spi = /* your half-duplex capable SPI */;
+let sensor = Pmw3610::new(hardware_spi, cs_pin, motion_pin, config);
 ```
 
 ## License

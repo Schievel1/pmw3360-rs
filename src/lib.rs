@@ -1,21 +1,20 @@
 // PMW3610 Low-Power Mouse Sensor Driver (Rust/Embassy/RMK port)
 //
 // Ported from the Zephyr driver implementation:
-// https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.c
-//
-// Note: This implementation uses half-duplex SPI (single bidirectional data line) via bit-banging.
+// https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.C
 
 #![no_std]
 
 use defmt::{debug, error, info, warn, Format};
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::spi::{ErrorType, SpiBus};
 
 // ============================================================================
 // Bidirectional Pin Trait
 // ============================================================================
 
-/// Trait for a bidirectional GPIO pin (required for PMW3610's SDIO line)
+/// Trait for a bidirectional GPIO pin (required for bit-banging SPI with PMW3610's SDIO line)
 ///
 /// The PMW3610 uses a single bidirectional data line for SPI communication.
 /// This trait abstracts over HAL-specific implementations.
@@ -38,6 +37,163 @@ pub trait BidirectionalPin {
     /// Read the pin state (only valid in input mode)
     fn is_low(&self) -> bool {
         !self.is_high()
+    }
+}
+
+// ============================================================================
+// Bit-banging SPI Bus Implementation
+// ============================================================================
+
+/// Error type for bit-banging SPI
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum BitBangError {
+    /// Generic SPI error (placeholder for compatibility)
+    Bus,
+}
+
+impl embedded_hal::spi::Error for BitBangError {
+    fn kind(&self) -> embedded_hal::spi::ErrorKind {
+        embedded_hal::spi::ErrorKind::Other
+    }
+}
+
+/// Bit-banging SPI bus for half-duplex communication
+///
+/// This implements the `embedded_hal::spi::SpiBus` trait using GPIO bit-banging.
+/// It's designed for sensors like PMW3610 that use a single bidirectional data line.
+///
+/// # Type Parameters
+/// - `SCK`: SPI clock pin (output)
+/// - `SDIO`: Bidirectional data pin (implements `BidirectionalPin`)
+///
+/// # Example
+///
+/// ```ignore
+/// use pmw3610_rs::{BitBangSpiBus, Pmw3610, Pmw3610Config};
+///
+/// let sck = /* your clock pin */;
+/// let sdio = /* your bidirectional data pin */;
+/// let cs = /* your chip select pin */;
+///
+/// let spi_bus = BitBangSpiBus::new(sck, sdio);
+/// let sensor = Pmw3610::new(spi_bus, cs, None, Pmw3610Config::default());
+/// ```
+pub struct BitBangSpiBus<SCK, SDIO>
+where
+    SCK: OutputPin,
+    SDIO: BidirectionalPin,
+{
+    sck: SCK,
+    sdio: SDIO,
+}
+
+impl<SCK, SDIO> BitBangSpiBus<SCK, SDIO>
+where
+    SCK: OutputPin,
+    SDIO: BidirectionalPin,
+{
+    /// Create a new bit-banging SPI bus
+    pub fn new(mut sck: SCK, sdio: SDIO) -> Self {
+        let _ = sck.set_high();
+        Self { sck, sdio }
+    }
+
+    #[inline(always)]
+    fn spi_delay() {
+        // Short busy-wait delay for SPI timing
+        // This is approximately 32 cycles at typical clock speeds
+        for _ in 0..32 {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Write a single byte over the bidirectional SPI (MSB first)
+    fn write_byte(&mut self, byte: u8) {
+        self.sdio.set_as_output();
+
+        for i in (0..8).rev() {
+            if (byte >> i) & 1 == 1 {
+                self.sdio.set_high();
+            } else {
+                self.sdio.set_low();
+            }
+            Self::spi_delay();
+
+            let _ = self.sck.set_low();
+            Self::spi_delay();
+
+            let _ = self.sck.set_high();
+            Self::spi_delay();
+        }
+    }
+
+    /// Read a single byte from the bidirectional SPI (MSB first)
+    fn read_byte(&mut self) -> u8 {
+        self.sdio.set_as_input();
+
+        let mut byte = 0u8;
+
+        for i in (0..8).rev() {
+            let _ = self.sck.set_low();
+            Self::spi_delay();
+
+            let _ = self.sck.set_high();
+            Self::spi_delay();
+
+            if self.sdio.is_high() {
+                byte |= 1 << i;
+            }
+        }
+
+        byte
+    }
+}
+
+impl<SCK, SDIO> ErrorType for BitBangSpiBus<SCK, SDIO>
+where
+    SCK: OutputPin,
+    SDIO: BidirectionalPin,
+{
+    type Error = BitBangError;
+}
+
+impl<SCK, SDIO> SpiBus for BitBangSpiBus<SCK, SDIO>
+where
+    SCK: OutputPin,
+    SDIO: BidirectionalPin,
+{
+    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        for word in words.iter_mut() {
+            *word = self.read_byte();
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        for &word in words {
+            self.write_byte(word);
+        }
+        Ok(())
+    }
+
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        // For half-duplex: write first, then read
+        self.write(write)?;
+        self.read(read)?;
+        Ok(())
+    }
+
+    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        // For half-duplex: read replaces written data
+        for word in words.iter_mut() {
+            self.write_byte(*word);
+            *word = self.read_byte();
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -200,49 +356,65 @@ pub struct MotionData {
     pub dy: i16,
 }
 
-/// PMW3610 driver using half-duplex bit-banged SPI
+/// PMW3610 driver using embedded-hal SPI traits
 ///
-/// The PMW3610 uses a bidirectional SDIO line for SPI communication.
-/// This driver implements bit-banging to support this half-duplex mode.
+/// This driver accepts any SPI bus implementation via the `embedded_hal::spi::SpiBus` trait.
+/// For the PMW3610's half-duplex SPI communication, you can use the provided `BitBangSpiBus`
+/// or any compatible hardware SPI peripheral.
 ///
 /// # Type Parameters
-/// - `SCK`: SPI clock pin (output)
-/// - `SDIO`: Bidirectional data pin
+/// - `SPI`: SPI bus implementing `embedded_hal::spi::SpiBus`
 /// - `CS`: Chip select pin (active low)
 /// - `MOTION`: Optional motion interrupt pin (active low)
-pub struct Pmw3610<SCK, SDIO, CS, MOTION>
+///
+/// # Example with bit-banging
+///
+/// ```ignore
+/// use pmw3610_rs::{BitBangSpiBus, Pmw3610, Pmw3610Config};
+///
+/// let spi_bus = BitBangSpiBus::new(sck_pin, sdio_pin);
+/// let mut sensor = Pmw3610::new(spi_bus, cs_pin, Some(motion_pin), Pmw3610Config::default());
+/// sensor.init().await?;
+/// ```
+///
+/// # Example with hardware SPI (if supported)
+///
+/// ```ignore
+/// use pmw3610_rs::{Pmw3610, Pmw3610Config};
+///
+/// let spi_bus = /* your hardware SPI bus */;
+/// let mut sensor = Pmw3610::new(spi_bus, cs_pin, Some(motion_pin), Pmw3610Config::default());
+/// sensor.init().await?;
+/// ```
+pub struct Pmw3610<SPI, CS, MOTION>
 where
-    SCK: OutputPin,
-    SDIO: BidirectionalPin,
+    SPI: SpiBus,
     CS: OutputPin,
     MOTION: InputPin,
 {
-    sck: SCK,
-    sdio: SDIO,
+    spi: SPI,
     cs: CS,
     motion_gpio: Option<MOTION>,
     config: Pmw3610Config,
     smart_flag: bool,
 }
 
-impl<SCK, SDIO, CS, MOTION> Pmw3610<SCK, SDIO, CS, MOTION>
+impl<SPI, CS, MOTION> Pmw3610<SPI, CS, MOTION>
 where
-    SCK: OutputPin,
-    SDIO: BidirectionalPin,
+    SPI: SpiBus,
     CS: OutputPin,
     MOTION: InputPin,
 {
     /// Create a new PMW3610 driver instance
-    pub fn new(
-        sck: SCK,
-        sdio: SDIO,
-        cs: CS,
-        motion_gpio: Option<MOTION>,
-        config: Pmw3610Config,
-    ) -> Self {
+    ///
+    /// # Arguments
+    /// - `spi`: SPI bus (use `BitBangSpiBus` for half-duplex bit-banging without hardware support)
+    /// - `cs`: Chip select pin (active low)
+    /// - `motion_gpio`: Optional motion interrupt pin (active low)
+    /// - `config`: Sensor configuration
+    pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3610Config) -> Self {
         Self {
-            sck,
-            sdio,
+            spi,
             cs,
             motion_gpio,
             config,
@@ -259,65 +431,14 @@ where
     }
 
     // ========================================================================
-    // Low-level SPI bit-banging
+    // Low-level timing helpers
     // ========================================================================
 
     #[inline(always)]
-    fn spi_delay() {
-        // Short busy-wait delay for SPI timing
-        // This is approximately 32 cycles at typical clock speeds
-        for _ in 0..32 {
-            core::hint::spin_loop();
-        }
-    }
-
-    #[inline(always)]
     fn short_delay() {
-        // Slightly longer delay
         for _ in 0..64 {
             core::hint::spin_loop();
         }
-    }
-
-    /// Write a byte over the bidirectional SPI (MSB first)
-    fn write_byte(&mut self, byte: u8) {
-        self.sdio.set_as_output();
-
-        for i in (0..8).rev() {
-            if (byte >> i) & 1 == 1 {
-                self.sdio.set_high();
-            } else {
-                self.sdio.set_low();
-            }
-            Self::spi_delay();
-
-            let _ = self.sck.set_low();
-            Self::spi_delay();
-
-            let _ = self.sck.set_high();
-            Self::spi_delay();
-        }
-    }
-
-    /// Read a byte from the bidirectional SPI (MSB first)
-    fn read_byte(&mut self) -> u8 {
-        self.sdio.set_as_input();
-
-        let mut byte = 0u8;
-
-        for i in (0..8).rev() {
-            let _ = self.sck.set_low();
-            Self::spi_delay();
-
-            let _ = self.sck.set_high();
-            Self::spi_delay();
-
-            if self.sdio.is_high() {
-                byte |= 1 << i;
-            }
-        }
-
-        byte
     }
 
     // ========================================================================
@@ -330,18 +451,21 @@ where
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with read bit (bit 7 = 0)
-        self.write_byte(addr & 0x7f);
+        self.spi
+            .write(&[addr & 0x7f])
+            .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SRAD_US)).await;
 
-        let value = self.read_byte();
+        let mut value = [0u8];
+        self.spi.read(&mut value).map_err(|_| Pmw3610Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
 
         Timer::after(Duration::from_micros(T_SRX_US)).await;
 
-        Ok(value)
+        Ok(value[0])
     }
 
     /// Read multiple bytes using burst read
@@ -350,14 +474,13 @@ where
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with read bit (bit 7 = 0)
-        self.write_byte(addr & 0x7f);
+        self.spi
+            .write(&[addr & 0x7f])
+            .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SRAD_US)).await;
 
-        for byte in data.iter_mut() {
-            *byte = self.read_byte();
-            Self::spi_delay();
-        }
+        self.spi.read(data).map_err(|_| Pmw3610Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
@@ -373,9 +496,9 @@ where
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with write bit (bit 7 = 1)
-        self.write_byte(addr | SPI_WRITE);
-
-        self.write_byte(value);
+        self.spi
+            .write(&[addr | SPI_WRITE, value])
+            .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
         let _ = self.cs.set_high();
@@ -528,7 +651,6 @@ where
     pub async fn init(&mut self) -> Result<(), Pmw3610Error> {
         // Set initial pin states
         let _ = self.cs.set_high();
-        let _ = self.sck.set_high();
         Timer::after(Duration::from_millis(1)).await;
 
         self.configure().await
@@ -627,36 +749,35 @@ mod rmk_integration {
     /// This device returns `Event::Joystick` events with relative X/Y movement.
     /// Use an `InputProcessor` (e.g., `JoystickProcessor` or `ScrollLayerProcessor`)
     /// to convert these events into `MouseReport` and send to the host.
-    pub struct Pmw3610Device<SCK, SDIO, CS, MOTION>
+    pub struct Pmw3610Device<SPI, CS, MOTION>
     where
-        SCK: OutputPin,
-        SDIO: BidirectionalPin,
+        SPI: SpiBus,
         CS: OutputPin,
         MOTION: InputPin,
     {
-        sensor: Pmw3610<SCK, SDIO, CS, MOTION>,
+        sensor: Pmw3610<SPI, CS, MOTION>,
         init_state: InitState,
         poll_interval: Duration,
     }
 
-    impl<SCK, SDIO, CS, MOTION> Pmw3610Device<SCK, SDIO, CS, MOTION>
+    impl<SPI, CS, MOTION> Pmw3610Device<SPI, CS, MOTION>
     where
-        SCK: OutputPin,
-        SDIO: BidirectionalPin,
+        SPI: SpiBus,
         CS: OutputPin,
         MOTION: InputPin,
     {
         const MAX_INIT_RETRIES: u8 = 3;
 
-        pub fn new(
-            sck: SCK,
-            sdio: SDIO,
-            cs: CS,
-            motion_gpio: Option<MOTION>,
-            config: Pmw3610Config,
-        ) -> Self {
+        /// Create a new PMW3610 device for RMK
+        ///
+        /// # Arguments
+        /// - `spi`: SPI bus (use `BitBangSpiBus` for half-duplex bit-banging without hardware support)
+        /// - `cs`: Chip select pin (active low)
+        /// - `motion_gpio`: Optional motion interrupt pin (active low)
+        /// - `config`: Sensor configuration
+        pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3610Config) -> Self {
             Self {
-                sensor: Pmw3610::new(sck, sdio, cs, motion_gpio, config),
+                sensor: Pmw3610::new(spi, cs, motion_gpio, config),
                 init_state: InitState::Pending,
                 poll_interval: Duration::from_micros(500),
             }
@@ -702,10 +823,9 @@ mod rmk_integration {
         }
     }
 
-    impl<SCK, SDIO, CS, MOTION> InputDevice for Pmw3610Device<SCK, SDIO, CS, MOTION>
+    impl<SPI, CS, MOTION> InputDevice for Pmw3610Device<SPI, CS, MOTION>
     where
-        SCK: OutputPin,
-        SDIO: BidirectionalPin,
+        SPI: SpiBus,
         CS: OutputPin,
         MOTION: InputPin,
     {
