@@ -8,7 +8,8 @@
 use defmt::{debug, error, info, warn, Format};
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
-use embedded_hal::spi::{ErrorType, SpiBus};
+use embedded_hal::spi::ErrorType;
+use embedded_hal_async::spi::SpiBus;
 
 // ============================================================================
 // Bidirectional Pin Trait
@@ -162,28 +163,28 @@ where
     SCK: OutputPin,
     SDIO: BidirectionalPin,
 {
-    fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
         for word in words.iter_mut() {
             *word = self.read_byte();
         }
         Ok(())
     }
 
-    fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
         for &word in words {
             self.write_byte(word);
         }
         Ok(())
     }
 
-    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+    async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
         // For half-duplex: write first, then read
-        self.write(write)?;
-        self.read(read)?;
+        self.write(write).await?;
+        self.read(read).await?;
         Ok(())
     }
 
-    fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+    async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
         // For half-duplex: read replaces written data
         for word in words.iter_mut() {
             self.write_byte(*word);
@@ -192,7 +193,7 @@ where
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
+    async fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
     }
 }
@@ -453,12 +454,16 @@ where
         // Send address with read bit (bit 7 = 0)
         self.spi
             .write(&[addr & 0x7f])
+            .await
             .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SRAD_US)).await;
 
         let mut value = [0u8];
-        self.spi.read(&mut value).map_err(|_| Pmw3610Error::Spi)?;
+        self.spi
+            .read(&mut value)
+            .await
+            .map_err(|_| Pmw3610Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
@@ -476,11 +481,12 @@ where
         // Send address with read bit (bit 7 = 0)
         self.spi
             .write(&[addr & 0x7f])
+            .await
             .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SRAD_US)).await;
 
-        self.spi.read(data).map_err(|_| Pmw3610Error::Spi)?;
+        self.spi.read(data).await.map_err(|_| Pmw3610Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
@@ -498,6 +504,7 @@ where
         // Send address with write bit (bit 7 = 1)
         self.spi
             .write(&[addr | SPI_WRITE, value])
+            .await
             .map_err(|_| Pmw3610Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;

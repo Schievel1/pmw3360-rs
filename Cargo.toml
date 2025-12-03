@@ -22,6 +22,7 @@ rmk = ["dep:rmk"]
 [dependencies]
 defmt = "1.0"
 embedded-hal = "1.0"
+embedded-hal-async = "1.0"
 embassy-time = { version = "0.5", features = ["defmt"] }
 
 # Optional HAL implementations
