@@ -436,33 +436,31 @@ where
         self.write_reg(PMW3610_REST1_DOWNSHIFT, REST1_DOWNSHIFT_INIT)
             .await?;
 
-        // Configuration: axis inversion
-        if self.config.swap_xy || self.config.invert_x || self.config.invert_y {
-            self.write_reg(PWM3610_SPI_PAGE0, SPI_PAGE0_1).await?;
+        // Configuration: axis swap and inversion
+        self.write_reg(PWM3610_SPI_PAGE0, SPI_PAGE0_1).await?;
 
-            let mut val = self.read_reg(PMW3610_RES_STEP).await?;
+        let mut res_step_val = self.read_reg(PMW3610_RES_STEP).await?;
 
-            if self.config.swap_xy {
-                val |= 1 << RES_STEP_SWAP_XY_BIT;
-            } else {
-                val &= !(1 << RES_STEP_SWAP_XY_BIT);
-            }
-
-            if self.config.invert_x {
-                val |= 1 << RES_STEP_INV_X_BIT;
-            } else {
-                val &= !(1 << RES_STEP_INV_X_BIT);
-            }
-
-            if self.config.invert_y {
-                val |= 1 << RES_STEP_INV_Y_BIT;
-            } else {
-                val &= !(1 << RES_STEP_INV_Y_BIT);
-            }
-
-            self.write_reg(PMW3610_RES_STEP, val).await?;
-            self.write_reg(PWM3610_SPI_PAGE1, SPI_PAGE1_0).await?;
+        if self.config.swap_xy {
+            res_step_val |= 1 << RES_STEP_SWAP_XY_BIT;
+        } else {
+            res_step_val &= !(1 << RES_STEP_SWAP_XY_BIT);
         }
+
+        if self.config.invert_x {
+            res_step_val |= 1 << RES_STEP_INV_X_BIT;
+        } else {
+            res_step_val &= !(1 << RES_STEP_INV_X_BIT);
+        }
+
+        if self.config.invert_y {
+            res_step_val |= 1 << RES_STEP_INV_Y_BIT;
+        } else {
+            res_step_val &= !(1 << RES_STEP_INV_Y_BIT);
+        }
+
+        self.write_reg(PMW3610_RES_STEP, res_step_val).await?;
+        self.write_reg(PWM3610_SPI_PAGE1, SPI_PAGE1_0).await?;
 
         self.spi_clk_off().await?;
 
