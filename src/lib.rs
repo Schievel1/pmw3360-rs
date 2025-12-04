@@ -437,10 +437,16 @@ where
             .await?;
 
         // Configuration: axis inversion
-        if self.config.invert_x || self.config.invert_y {
+        if self.config.swap_xy || self.config.invert_x || self.config.invert_y {
             self.write_reg(PWM3610_SPI_PAGE0, SPI_PAGE0_1).await?;
 
             let mut val = self.read_reg(PMW3610_RES_STEP).await?;
+
+            if self.config.swap_xy {
+                val |= 1 << RES_STEP_SWAP_XY_BIT;
+            } else {
+                val &= !(1 << RES_STEP_SWAP_XY_BIT);
+            }
 
             if self.config.invert_x {
                 val |= 1 << RES_STEP_INV_X_BIT;
@@ -529,12 +535,6 @@ where
                 self.smart_flag = true;
             }
         }
-
-        let (dx, dy) = if self.config.swap_xy {
-            (dy, dx)
-        } else {
-            (dx, dy)
-        };
 
         Ok(MotionData { dx, dy })
     }
