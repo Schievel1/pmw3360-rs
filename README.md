@@ -1,15 +1,14 @@
 # pmw3610-rs
 
+> [!Warning]
+> This implementation has been merged into RMK repository and no longer needed if you are planning to use with RMK.
+
 PixArt PMW3610 Low-Power Mouse Sensor Driver for Rust/Embassy/RMK.
 
 Ported from the Zephyr driver implementation:
 https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.c
 
-> [!Warning]
-> This implementation is very experimental and only tested with nRF52840.
-> The custom input device interface in RMK is still in early stages and may be subject to changes in future versions of RMK.
-
-## Usage
+## Usage with RMK
 
 ### 1. Add to your Cargo.toml dependencies
 
