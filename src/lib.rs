@@ -1,163 +1,206 @@
-// PMW3610 Low-Power Mouse Sensor Driver (Rust/Embassy/RMK port)
+// PMW3360 Low-Power Mouse Sensor Driver (Rust/Embassy/RMK port)
 //
-// Ported from the Zephyr driver implementation:
-// https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.C
+// Ported from kot149s PMW3610 driver:
+// https://github.com/kot149/pmw3610-rs
+// Which is ported from the Zephyr driver implementation:
+// https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.c
 
 #![no_std]
-
-mod bidirectional_pin;
-mod bitbang_spi;
-
-pub use bidirectional_pin::BidirectionalPin;
-pub use bitbang_spi::{BitBangError, BitBangSpiBus};
 
 use defmt::{debug, error, info, warn, Format};
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::spi::SpiBus;
 
-// ============================================================================
-// Page 0 registers
-// ============================================================================
-const PMW3610_PROD_ID: u8 = 0x00;
 #[allow(dead_code)]
-const PMW3610_REV_ID: u8 = 0x01;
-const PMW3610_MOTION: u8 = 0x02;
-#[allow(dead_code)]
-const PMW3610_DELTA_X_L: u8 = 0x03;
-#[allow(dead_code)]
-const PMW3610_DELTA_Y_L: u8 = 0x04;
-const PMW3610_DELTA_XY_H: u8 = 0x05;
-const PMW3610_PERFORMANCE: u8 = 0x11;
-const PMW3610_BURST_READ: u8 = 0x12;
-const PMW3610_RUN_DOWNSHIFT: u8 = 0x1b;
-const PMW3610_REST1_RATE: u8 = 0x1c;
-const PMW3610_REST1_DOWNSHIFT: u8 = 0x1d;
-const PMW3610_OBSERVATION1: u8 = 0x2d;
-const PMW3610_SMART_MODE: u8 = 0x32;
-const PMW3610_POWER_UP_RESET: u8 = 0x3a;
-#[allow(dead_code)]
-const PMW3610_SHUTDOWN: u8 = 0x3b;
-const PMW3610_SPI_CLK_ON_REQ: u8 = 0x41;
-const PWM3610_SPI_PAGE0: u8 = 0x7f;
+#[derive(Eq, PartialEq, Debug)]
+enum Register {
+    ProductId,
+    RevisionId,
+    Motion,
+    DeltaXL,
+    DeltaXH,
+    DeltaYL,
+    DeltaYH,
+    SQUAL,
+    RawDataSum,
+    MaximumRawData,
+    MinimumRawData,
+    ShutterLower,
+    ShutterUpper,
+    Control,
+    Config1,
+    Config2,
+    AngleTune,
+    FrameCapture,
+    SromEnable,
+    RunDownshift,
+    Rest1RateLower,
+    Rest1RateUpper,
+    Rest1Downshift,
+    Rest2RateLower,
+    Rest2RateUpper,
+    Rest2Downshift,
+    Rest3RateLower,
+    Rest3RateUpper,
+    Observation,
+    DataOutLower,
+    DataOutUpper,
+    RawDataDump,
+    SromId,
+    MinSqRun,
+    RawDataThreshold,
+    Config5,
+    PowerUpReset,
+    Shutdown,
+    InverseProductId,
+    LiftCutoffTune3,
+    AngleSnap,
+    LiftCutoffTune1,
+    MotionBurst,
+    LiftCutoffTuneTimeout,
+    LiftCutoffTuneMinLength,
+    SromLoadBurst,
+    LiftConfig,
+    RawDataBurst,
+    LiftCutoffTune2,
+}
 
-// ============================================================================
-// Page 1 registers
-// ============================================================================
-const PMW3610_RES_STEP: u8 = 0x05;
-const PWM3610_SPI_PAGE1: u8 = 0x7f;
+impl Register {
+    fn value(&self) -> u8 {
+        match self {
+            Register::ProductId => 0x00,
+            Register::RevisionId => 0x01,
+            Register::Motion => 0x02,
+            Register::DeltaXL => 0x03,
+            Register::DeltaXH => 0x04,
+            Register::DeltaYL => 0x05,
+            Register::DeltaYH => 0x06,
+            Register::SQUAL => 0x07,
+            Register::RawDataSum => 0x08,
+            Register::MaximumRawData => 0x09,
+            Register::MinimumRawData => 0x0a,
+            Register::ShutterLower => 0x0b,
+            Register::ShutterUpper => 0x0c,
+            Register::Control => 0x0d,
+            Register::Config1 => 0x0f,
+            Register::Config2 => 0x10,
+            Register::AngleTune => 0x11,
+            Register::FrameCapture => 0x12,
+            Register::SromEnable => 0x13,
+            Register::RunDownshift => 0x14,
+            Register::Rest1RateLower => 0x15,
+            Register::Rest1RateUpper => 0x16,
+            Register::Rest1Downshift => 0x17,
+            Register::Rest2RateLower => 0x18,
+            Register::Rest2RateUpper => 0x19,
+            Register::Rest2Downshift => 0x1a,
+            Register::Rest3RateLower => 0x1b,
+            Register::Rest3RateUpper => 0x1c,
+            Register::Observation => 0x24,
+            Register::DataOutLower => 0x25,
+            Register::DataOutUpper => 0x26,
+            Register::RawDataDump => 0x29,
+            Register::SromId => 0x2a,
+            Register::MinSqRun => 0x2b,
+            Register::RawDataThreshold => 0x2c,
+            Register::Config5 => 0x2f,
+            Register::PowerUpReset => 0x3a,
+            Register::Shutdown => 0x3b,
+            Register::InverseProductId => 0x3f,
+            Register::LiftCutoffTune3 => 0x41,
+            Register::AngleSnap => 0x42,
+            Register::LiftCutoffTune1 => 0x4a,
+            Register::MotionBurst => 0x50,
+            Register::LiftCutoffTuneTimeout => 0x58,
+            Register::LiftCutoffTuneMinLength => 0x5a,
+            Register::SromLoadBurst => 0x62,
+            Register::LiftConfig => 0x63,
+            Register::RawDataBurst => 0x64,
+            Register::LiftCutoffTune2 => 0x65,
+        }
+    }
+}
 
 // ============================================================================
 // Burst register offsets
 // ============================================================================
-const BURST_MOTION: usize = 0;
-const BURST_DELTA_X_L: usize = 1;
-const BURST_DELTA_Y_L: usize = 2;
-const BURST_DELTA_XY_H: usize = 3;
+const BURST_MOTION_FLAGS: usize = 0;
 #[allow(dead_code)]
-const BURST_SQUAL: usize = 4;
-const BURST_SHUTTER_HI: usize = 5;
-const BURST_SHUTTER_LO: usize = 6;
-
-const BURST_DATA_LEN_NORMAL: usize = BURST_DELTA_XY_H + 1;
-const BURST_DATA_LEN_SMART: usize = BURST_SHUTTER_LO + 1;
-#[allow(dead_code)]
-const BURST_DATA_LEN_MAX: usize = if BURST_DATA_LEN_NORMAL > BURST_DATA_LEN_SMART {
-    BURST_DATA_LEN_NORMAL
-} else {
-    BURST_DATA_LEN_SMART
-};
-
-// ============================================================================
-// Init sequence values
-// ============================================================================
-const OBSERVATION1_INIT_MASK: u8 = 0x0f;
-const PERFORMANCE_INIT: u8 = 0x0d;
-const RUN_DOWNSHIFT_INIT: u8 = 0x04;
-const REST1_RATE_INIT: u8 = 0x04;
-const REST1_DOWNSHIFT_INIT: u8 = 0x0f;
+const BURST_OBSERVATION: usize = 1;
+const BURST_DELTA_X_L: usize = 2;
+const BURST_DELTA_X_H: usize = 3;
+const BURST_DELTA_Y_L: usize = 4;
+const BURST_DELTA_Y_H: usize = 5;
+const BURST_DATA_LEN: usize = 6;
 
 // ============================================================================
 // Constants
 // ============================================================================
-const PRODUCT_ID_PMW3610: u8 = 0x3e;
+const PRODUCT_ID_PMW3360: u8 = 0x42;
 const SPI_WRITE: u8 = 0x80; // BIT(7)
 const MOTION_STATUS_MOTION: u8 = 0x80; // BIT(7)
-const SPI_CLOCK_ON_REQ_ON: u8 = 0xba;
-const SPI_CLOCK_ON_REQ_OFF: u8 = 0xb5;
-#[allow(dead_code)]
-const RES_STEP_SWAP_XY_BIT: u8 = 7;
-const RES_STEP_INV_X_BIT: u8 = 6;
-const RES_STEP_INV_Y_BIT: u8 = 5;
-const RES_STEP_RES_MASK: u8 = 0x1f;
-const PERFORMANCE_FMODE_MASK: u8 = 0x0f << 4;
-const PERFORMANCE_FMODE_NORMAL: u8 = 0x00 << 4;
-const PERFORMANCE_FMODE_FORCE_AWAKE: u8 = 0x0f << 4;
+const MOTION_STATUS_LIFTED: u8 = 0x08; // BIT(4)
 const POWER_UP_RESET_VAL: u8 = 0x5a;
-#[allow(dead_code)]
-const POWER_UP_WAKEUP: u8 = 0x96;
-#[allow(dead_code)]
-const SHUTDOWN_ENABLE: u8 = 0xe7;
-const SPI_PAGE0_1: u8 = 0xff;
-const SPI_PAGE1_0: u8 = 0x00;
-const SHUTTER_SMART_THRESHOLD: u16 = 45;
-const SMART_MODE_ENABLE: u8 = 0x00;
-const SMART_MODE_DISABLE: u8 = 0x80;
-
-const PMW3610_DATA_SIZE_BITS: usize = 12;
 
 // Timing constants
-const RESET_DELAY_MS: u64 = 10;
-const INIT_OBSERVATION_DELAY_MS: u64 = 10;
-const CLOCK_ON_DELAY_US: u64 = 300;
+const RESET_DELAY_MS: u64 = 50;
 
-// SPI timing constants (from PMW3610 datasheet)
+// SPI timing constants (from PMW3360 datasheet)
 const T_NCS_SCLK_US: u64 = 1;
-const T_SRAD_US: u64 = 5;
-const T_SRX_US: u64 = 2;
-const T_SWX_US: u64 = 35;
-const T_SCLK_NCS_WR_US: u64 = 20;
-const T_BEXIT_US: u64 = 2;
+const T_SRAD_US: u64 = 160;
+const T_SRAD_MOTBR_US: u64 = 35;
+const T_SRX_US: u64 = 20 - T_NCS_SCLK_US;
+const T_SWX_US: u64 = 180 - T_SCLK_NCS_WR_US;
+const T_SCLK_NCS_WR_US: u64 = 35 - T_NCS_SCLK_US;
+const T_BEXIT_US: u64 = 1;
 
 // Resolution constants
-const RES_STEP: u16 = 200;
-const RES_MIN: u16 = 200;
-const RES_MAX: u16 = 3200;
+const RES_STEP: u16 = 100;
+const RES_MIN: u16 = 100;
+const RES_MAX: u16 = 12000;
 
-/// PMW3610 configuration
+// Firware signature TODO: Add srom versions?
+const FW_SIG_PID: u8 = 0x42;
+const FW_SIG_INV_PID: u8 = 0xBD;
+
+/// PMW3360 configuration
 #[derive(Clone)]
-pub struct Pmw3610Config {
-    /// CPI resolution (200-3200, step 200). Set to -1 to use default.
-    pub res_cpi: i16,
+pub struct Pmw3360Config {
+    /// CPI resolution (100-12000, step 100)
+    pub res_cpi: u16,
+    /// rot_trans_angle (-127 to 127
+    pub rot_trans_angle: i8,
+    /// liftoff distance
+    pub liftoff_dist: u8,
     /// Invert X axis
     pub invert_x: bool,
     /// Invert Y axis
     pub invert_y: bool,
     /// Swap X and Y axes
     pub swap_xy: bool,
-    /// Force awake mode (disable power saving)
-    pub force_awake: bool,
-    /// Enable smart mode for better tracking on shiny surfaces
-    pub smart_mode: bool,
+    // Enable smart mode for better tracking on shiny surfaces
+    // pub smart_mode: bool,
 }
 
-impl Default for Pmw3610Config {
+impl Default for Pmw3360Config {
     fn default() -> Self {
         Self {
-            res_cpi: -1, // Use default
+            res_cpi: 1600,
+            rot_trans_angle: 0,
+            liftoff_dist: 0x02,
             invert_x: false,
             invert_y: false,
             swap_xy: false,
-            force_awake: false,
-            smart_mode: false,
+            // smart_mode: false,
         }
     }
 }
 
-/// PMW3610 error types
+/// PMW3360 error types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 #[allow(dead_code)]
-pub enum Pmw3610Error {
+pub enum Pmw3360Error {
     /// SPI communication error
     Spi,
     /// Invalid product ID detected
@@ -166,6 +209,8 @@ pub enum Pmw3610Error {
     InitFailed,
     /// Invalid CPI value
     InvalidCpi,
+    /// Invalid firmware signature detected
+    InvalidFwSignature((u8, u8)),
 }
 
 /// Motion data from the sensor
@@ -175,37 +220,31 @@ pub struct MotionData {
     pub dy: i16,
 }
 
-/// PMW3610 driver using embedded-hal SPI traits
+/// PMW3360 driver using embedded-hal SPI traits
 ///
 /// This driver accepts any SPI bus implementation via the `embedded_hal::spi::SpiBus` trait.
-/// For the PMW3610's half-duplex SPI communication, you can use the provided `BitBangSpiBus`
-/// or any compatible hardware SPI peripheral.
 ///
 /// # Type Parameters
 /// - `SPI`: SPI bus implementing `embedded_hal::spi::SpiBus`
 /// - `CS`: Chip select pin (active low)
 /// - `MOTION`: Optional motion interrupt pin (active low)
 ///
-/// # Example with bit-banging
+/// # Example
 ///
 /// ```ignore
-/// use pmw3610_rs::{BitBangSpiBus, Pmw3610, Pmw3610Config};
+/// use pmw3360_rs::{Pmw3360, Pmw3360Config};
 ///
-/// let spi_bus = BitBangSpiBus::new(sck_pin, sdio_pin);
-/// let mut sensor = Pmw3610::new(spi_bus, cs_pin, Some(motion_pin), Pmw3610Config::default());
+/// let mut spi_cfg = Config::default();
+/// // MODE_3 = Polarity::IdleHigh + Phase::CaptureOnSecondTransition
+/// spi_cfg.polarity = Polarity::IdleHigh;
+/// spi_cfg.phase = Phase::CaptureOnSecondTransition;
+/// spi_cfg.frequency = 2_000_000;
+///
+/// let pmw3360_spi = Spi::new(p.SPI0, sck_pin, mosi_pin, miso_pin, p.DMA_CH2, p.DMA_CH3, spi_cfg);
+/// let mut sensor = Pmw3360::new(spi_bus, cs_pin, Some(motion_pin), Pmw3360Config::default(), None);
 /// sensor.init().await?;
 /// ```
-///
-/// # Example with hardware SPI (if supported)
-///
-/// ```ignore
-/// use pmw3610_rs::{Pmw3610, Pmw3610Config};
-///
-/// let spi_bus = /* your hardware SPI bus */;
-/// let mut sensor = Pmw3610::new(spi_bus, cs_pin, Some(motion_pin), Pmw3610Config::default());
-/// sensor.init().await?;
-/// ```
-pub struct Pmw3610<SPI, CS, MOTION>
+pub struct Pmw3360<'a, SPI, CS, MOTION>
 where
     SPI: SpiBus,
     CS: OutputPin,
@@ -214,30 +253,57 @@ where
     spi: SPI,
     cs: CS,
     motion_gpio: Option<MOTION>,
-    config: Pmw3610Config,
-    smart_flag: bool,
+    config: Pmw3360Config,
+    in_burst: bool,
+    srom_firmware: Option<&'a [u8]>,
 }
 
-impl<SPI, CS, MOTION> Pmw3610<SPI, CS, MOTION>
+impl<'a, SPI, CS, MOTION> Pmw3360<'a, SPI, CS, MOTION>
 where
     SPI: SpiBus,
     CS: OutputPin,
     MOTION: InputPin,
 {
-    /// Create a new PMW3610 driver instance
+    /// Create a new PMW3360 driver instance
     ///
     /// # Arguments
-    /// - `spi`: SPI bus (use `BitBangSpiBus` for half-duplex bit-banging without hardware support)
+    /// - `spi`: SPI bus
     /// - `cs`: Chip select pin (active low)
     /// - `motion_gpio`: Optional motion interrupt pin (active low)
     /// - `config`: Sensor configuration
-    pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3610Config) -> Self {
+    pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3360Config) -> Self {
         Self {
             spi,
             cs,
             motion_gpio,
             config,
-            smart_flag: false,
+            in_burst: false,
+            srom_firmware: None,
+        }
+    }
+
+    /// Create a new PMW3360 driver instance with firmware (SROM)
+    ///
+    /// # Arguments
+    /// - `spi`: SPI bus
+    /// - `cs`: Chip select pin (active low)
+    /// - `motion_gpio`: Optional motion interrupt pin (active low)
+    /// - `config`: Sensor configuration
+    /// - `firmware`: Slice containing new firmware (SROM) which is flashed every boot of the sensor
+    pub fn new_with_firmware(
+        spi: SPI,
+        cs: CS,
+        motion_gpio: Option<MOTION>,
+        config: Pmw3360Config,
+        firmware: &'a [u8],
+    ) -> Self {
+        Self {
+            spi,
+            cs,
+            motion_gpio,
+            config,
+            in_burst: false,
+            srom_firmware: Some(firmware),
         }
     }
 
@@ -265,15 +331,15 @@ where
     // ========================================================================
 
     /// Read a single byte from a register
-    async fn read_reg(&mut self, addr: u8) -> Result<u8, Pmw3610Error> {
+    async fn read_reg(&mut self, register: Register) -> Result<u8, Pmw3360Error> {
         let _ = self.cs.set_low();
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with read bit (bit 7 = 0)
         self.spi
-            .write(&[addr & 0x7f])
+            .write(&[register.value() & 0x7f])
             .await
-            .map_err(|_| Pmw3610Error::Spi)?;
+            .map_err(|_| Pmw3360Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SRAD_US)).await;
 
@@ -281,7 +347,7 @@ where
         self.spi
             .read(&mut value)
             .await
-            .map_err(|_| Pmw3610Error::Spi)?;
+            .map_err(|_| Pmw3360Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
@@ -292,19 +358,23 @@ where
     }
 
     /// Read multiple bytes using burst read
-    async fn read_burst(&mut self, addr: u8, data: &mut [u8]) -> Result<(), Pmw3610Error> {
+    async fn read_burst(
+        &mut self,
+        register: Register,
+        data: &mut [u8],
+    ) -> Result<(), Pmw3360Error> {
         let _ = self.cs.set_low();
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with read bit (bit 7 = 0)
         self.spi
-            .write(&[addr & 0x7f])
+            .write(&[register.value() & 0x7f])
             .await
-            .map_err(|_| Pmw3610Error::Spi)?;
+            .map_err(|_| Pmw3360Error::Spi)?;
 
-        Timer::after(Duration::from_micros(T_SRAD_US)).await;
+        Timer::after(Duration::from_micros(T_SRAD_MOTBR_US)).await;
 
-        self.spi.read(data).await.map_err(|_| Pmw3610Error::Spi)?;
+        self.spi.read(data).await.map_err(|_| Pmw3360Error::Spi)?;
 
         Self::short_delay();
         let _ = self.cs.set_high();
@@ -315,15 +385,15 @@ where
     }
 
     /// Write a single byte to a register
-    async fn write_reg(&mut self, addr: u8, value: u8) -> Result<(), Pmw3610Error> {
+    async fn write_reg(&mut self, register: Register, value: u8) -> Result<(), Pmw3360Error> {
         let _ = self.cs.set_low();
         Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
 
         // Send address with write bit (bit 7 = 1)
         self.spi
-            .write(&[addr | SPI_WRITE, value])
+            .write(&[register.value() | SPI_WRITE, value])
             .await
-            .map_err(|_| Pmw3610Error::Spi)?;
+            .map_err(|_| Pmw3360Error::Spi)?;
 
         Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
         let _ = self.cs.set_high();
@@ -334,61 +404,37 @@ where
     }
 
     // ========================================================================
-    // SPI clock control
-    // ========================================================================
-
-    async fn spi_clk_on(&mut self) -> Result<(), Pmw3610Error> {
-        self.write_reg(PMW3610_SPI_CLK_ON_REQ, SPI_CLOCK_ON_REQ_ON)
-            .await?;
-        Timer::after(Duration::from_micros(CLOCK_ON_DELAY_US)).await;
-        Ok(())
-    }
-
-    async fn spi_clk_off(&mut self) -> Result<(), Pmw3610Error> {
-        self.write_reg(PMW3610_SPI_CLK_ON_REQ, SPI_CLOCK_ON_REQ_OFF)
-            .await
-    }
-
-    // ========================================================================
     // Sensor configuration
     // ========================================================================
 
-    /// Set sensor resolution in CPI (200-3200, step 200)
-    pub async fn set_resolution(&mut self, cpi: u16) -> Result<(), Pmw3610Error> {
+    /// Set sensor resolution in CPI (100-12000, step 100)
+    pub async fn set_resolution(&mut self, cpi: u16) -> Result<(), Pmw3360Error> {
         if !(RES_MIN..=RES_MAX).contains(&cpi) {
-            return Err(Pmw3610Error::InvalidCpi);
+            return Err(Pmw3360Error::InvalidCpi);
         }
 
-        self.spi_clk_on().await?;
+        self.write_reg(Register::Config1, ((cpi / RES_STEP) - 1) as u8)
+            .await?;
 
-        self.write_reg(PWM3610_SPI_PAGE0, SPI_PAGE0_1).await?;
+        debug!("PMW3360: Resolution set to {} CPI", cpi);
 
-        let mut val = self.read_reg(PMW3610_RES_STEP).await?;
-        val &= !RES_STEP_RES_MASK;
-        val |= (cpi / RES_STEP) as u8;
-
-        self.write_reg(PMW3610_RES_STEP, val).await?;
-        self.write_reg(PWM3610_SPI_PAGE1, SPI_PAGE1_0).await?;
-
-        self.spi_clk_off().await?;
-
-        debug!("PMW3610: Resolution set to {} CPI", cpi);
         Ok(())
     }
 
-    /// Set force awake mode
-    pub async fn force_awake(&mut self, enable: bool) -> Result<(), Pmw3610Error> {
-        let mut val = self.read_reg(PMW3610_PERFORMANCE).await?;
-        val &= !PERFORMANCE_FMODE_MASK;
-        if enable {
-            val |= PERFORMANCE_FMODE_FORCE_AWAKE;
-        } else {
-            val |= PERFORMANCE_FMODE_NORMAL;
-        }
+    /// Set sensor rotational transform angle (-127 to 127)
+    pub async fn set_rot_trans_angle(&mut self, angle: i8) -> Result<(), Pmw3360Error> {
+        self.write_reg(Register::AngleTune, angle as u8).await?;
 
-        self.spi_clk_on().await?;
-        self.write_reg(PMW3610_PERFORMANCE, val).await?;
-        self.spi_clk_off().await?;
+        debug!("PMW3360: Rotational transform angle set to {}", angle);
+
+        Ok(())
+    }
+
+    /// Set sensor liftoff distance
+    pub async fn set_liftoff_dist(&mut self, dist: u8) -> Result<(), Pmw3360Error> {
+        self.write_reg(Register::LiftConfig, dist).await?;
+
+        debug!("PMW3360: Liftoff distance set to {}", dist);
 
         Ok(())
     }
@@ -398,86 +444,83 @@ where
     // ========================================================================
 
     /// Configure and initialize the sensor
-    async fn configure(&mut self) -> Result<(), Pmw3610Error> {
+    async fn configure(&mut self) -> Result<(), Pmw3360Error> {
         // Power-up reset
-        self.write_reg(PMW3610_POWER_UP_RESET, POWER_UP_RESET_VAL)
+        self.write_reg(Register::PowerUpReset, POWER_UP_RESET_VAL)
             .await?;
         Timer::after(Duration::from_millis(RESET_DELAY_MS)).await;
 
         // Verify product ID
-        let val = self.read_reg(PMW3610_PROD_ID).await?;
-        if val != PRODUCT_ID_PMW3610 {
+        let val = self.read_reg(Register::ProductId).await?;
+        if val != PRODUCT_ID_PMW3360 {
             error!("Invalid product id: {:#02x}", val);
-            return Err(Pmw3610Error::InvalidProductId(val));
+            return Err(Pmw3360Error::InvalidProductId(val));
         }
-        info!("PMW3610 detected, product ID: {:#02x}", val);
+        info!("PMW3360 detected, product ID: {:#02x}", val);
 
         // Power-up init sequence
-        self.spi_clk_on().await?;
-
-        self.write_reg(PMW3610_OBSERVATION1, 0).await?;
-        Timer::after(Duration::from_millis(INIT_OBSERVATION_DELAY_MS)).await;
-
-        let val = self.read_reg(PMW3610_OBSERVATION1).await?;
-        if (val & OBSERVATION1_INIT_MASK) != OBSERVATION1_INIT_MASK {
-            error!("Unexpected OBSERVATION1 value: {:#02x}", val);
-            return Err(Pmw3610Error::InitFailed);
-        }
 
         // Read motion registers to clear them
-        for reg in PMW3610_MOTION..=PMW3610_DELTA_XY_H {
-            self.read_reg(reg).await?;
+        self.read_reg(Register::Motion).await?;
+        self.read_reg(Register::DeltaXL).await?;
+        self.read_reg(Register::DeltaXH).await?;
+        self.read_reg(Register::DeltaYL).await?;
+        self.read_reg(Register::DeltaYH).await?;
+
+        if let Some(firmware) = self.srom_firmware {
+            self.upload_firmware(firmware).await?;
         }
 
-        self.write_reg(PMW3610_PERFORMANCE, PERFORMANCE_INIT).await?;
-        self.write_reg(PMW3610_RUN_DOWNSHIFT, RUN_DOWNSHIFT_INIT)
+        self.set_resolution(self.config.res_cpi as u16).await?;
+        self.write_reg(Register::Config2, 0x00).await?;
+        self.set_rot_trans_angle(self.config.rot_trans_angle)
             .await?;
-        self.write_reg(PMW3610_REST1_RATE, REST1_RATE_INIT).await?;
-        self.write_reg(PMW3610_REST1_DOWNSHIFT, REST1_DOWNSHIFT_INIT)
-            .await?;
+        self.set_liftoff_dist(self.config.liftoff_dist).await?;
 
-        // Configuration: axis swap and inversion
-        self.write_reg(PWM3610_SPI_PAGE0, SPI_PAGE0_1).await?;
+        self.check_fw_signature().await?;
 
-        let mut res_step_val = self.read_reg(PMW3610_RES_STEP).await?;
+        info!("PMW3360 initialized successfully");
+        Ok(())
+    }
 
-        if self.config.swap_xy {
-            res_step_val |= 1 << RES_STEP_SWAP_XY_BIT;
-        } else {
-            res_step_val &= !(1 << RES_STEP_SWAP_XY_BIT);
+    /// upload SROM to sensor
+    async fn upload_firmware(&mut self, firmware: &[u8]) -> Result<(), Pmw3360Error> {
+        self.write_reg(Register::Config2, 0x00).await?; // disable REST mode
+
+        self.write_reg(Register::SromEnable, 0x1d).await?;
+        Timer::after(Duration::from_millis(10)).await;
+        self.write_reg(Register::SromEnable, 0x18).await?;
+
+        let _ = self.cs.set_low();
+        Timer::after(Duration::from_micros(T_NCS_SCLK_US)).await;
+
+        self.spi
+            .write(&[Register::SromLoadBurst.value() | SPI_WRITE])
+            .await
+            .map_err(|_| Pmw3360Error::Spi)?;
+
+        Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
+
+        for &byte in firmware {
+            self.spi
+                .write(&[byte])
+                .await
+                .map_err(|_| Pmw3360Error::Spi)?;
+            Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
         }
 
-        if self.config.invert_x {
-            res_step_val |= 1 << RES_STEP_INV_X_BIT;
-        } else {
-            res_step_val &= !(1 << RES_STEP_INV_X_BIT);
-        }
+        let _ = self.cs.set_high();
 
-        if self.config.invert_y {
-            res_step_val |= 1 << RES_STEP_INV_Y_BIT;
-        } else {
-            res_step_val &= !(1 << RES_STEP_INV_Y_BIT);
-        }
+        Timer::after(Duration::from_micros(T_SWX_US)).await;
 
-        self.write_reg(PMW3610_RES_STEP, res_step_val).await?;
-        self.write_reg(PWM3610_SPI_PAGE1, SPI_PAGE1_0).await?;
+        self.read_reg(Register::SromId).await?;
+        self.write_reg(Register::Config2, 0x00).await?;
 
-        self.spi_clk_off().await?;
-
-        // The remaining functions call spi_clk_on/off independently.
-
-        if self.config.res_cpi > 0 {
-            self.set_resolution(self.config.res_cpi as u16).await?;
-        }
-
-        self.force_awake(self.config.force_awake).await?;
-
-        info!("PMW3610 initialized successfully");
         Ok(())
     }
 
     /// Initialize the sensor (public API)
-    pub async fn init(&mut self) -> Result<(), Pmw3610Error> {
+    pub async fn init(&mut self) -> Result<(), Pmw3360Error> {
         // Set initial pin states
         let _ = self.cs.set_high();
         Timer::after(Duration::from_millis(1)).await;
@@ -490,60 +533,66 @@ where
     // ========================================================================
 
     /// Read motion data from the sensor (motion work handler)
-    pub async fn read_motion(&mut self) -> Result<MotionData, Pmw3610Error> {
-        let burst_data_len = if self.config.smart_mode {
-            BURST_DATA_LEN_SMART
-        } else {
-            BURST_DATA_LEN_NORMAL
-        };
+    pub async fn read_motion(&mut self) -> Result<MotionData, Pmw3360Error> {
+        if !self.in_burst {
+            self.write_reg(Register::MotionBurst, 0x00).await?;
+            self.in_burst = true;
+        }
 
-        let mut burst_data = [0u8; BURST_DATA_LEN_SMART];
-        self.read_burst(PMW3610_BURST_READ, &mut burst_data[..burst_data_len])
+        let mut burst_data = [0u8; BURST_DATA_LEN];
+        self.read_burst(Register::MotionBurst, &mut burst_data[..BURST_DATA_LEN])
             .await?;
 
-        if (burst_data[BURST_MOTION] & MOTION_STATUS_MOTION) == 0x00 {
+        debug!("PMW3360: Burst raw data {:?}", burst_data);
+
+        // panic recovery, sometimes burst mode works weird.
+        if (burst_data[BURST_MOTION_FLAGS] & 0b111) != 0x00 {
+            debug!("PMW3360: Burst panic recovery");
+            self.in_burst = false;
+        }
+
+        if (burst_data[BURST_MOTION_FLAGS] & MOTION_STATUS_MOTION) == 0x00 {
+            return Ok(MotionData::default());
+        }
+        if (burst_data[BURST_MOTION_FLAGS] & MOTION_STATUS_LIFTED) != 0x00 {
             return Ok(MotionData::default());
         }
 
-        // Extract 12-bit signed motion values
-        let x = ((burst_data[BURST_DELTA_XY_H] as u16) << 4) & 0xf00
-            | (burst_data[BURST_DELTA_X_L] as u16);
-        let y = ((burst_data[BURST_DELTA_XY_H] as u16) << 8) & 0xf00
-            | (burst_data[BURST_DELTA_Y_L] as u16);
+        let mut dx: i16 =
+            i16::from_le_bytes([burst_data[BURST_DELTA_X_L], burst_data[BURST_DELTA_X_H]]);
+        let mut dy: i16 =
+            i16::from_le_bytes([burst_data[BURST_DELTA_Y_L], burst_data[BURST_DELTA_Y_H]]);
 
-        let dx = Self::sign_extend(x, PMW3610_DATA_SIZE_BITS - 1);
-        let dy = Self::sign_extend(y, PMW3610_DATA_SIZE_BITS - 1);
-
-        // Smart mode handling
-        if self.config.smart_mode {
-            let shutter_val = ((burst_data[BURST_SHUTTER_HI] as u16) << 8)
-                | (burst_data[BURST_SHUTTER_LO] as u16);
-
-            if self.smart_flag && shutter_val < SHUTTER_SMART_THRESHOLD {
-                self.spi_clk_on().await?;
-                self.write_reg(PMW3610_SMART_MODE, SMART_MODE_ENABLE)
-                    .await?;
-                self.spi_clk_off().await?;
-                self.smart_flag = false;
-            } else if !self.smart_flag && shutter_val > SHUTTER_SMART_THRESHOLD {
-                self.spi_clk_on().await?;
-                self.write_reg(PMW3610_SMART_MODE, SMART_MODE_DISABLE)
-                    .await?;
-                self.spi_clk_off().await?;
-                self.smart_flag = true;
-            }
+        if self.config.invert_x {
+            dx = dx * (-1);
         }
+        if self.config.invert_y {
+            dy = dy * (-1);
+        }
+        if self.config.swap_xy {
+            (dx, dy) = (dy, dx);
+        }
+
+        debug!("PMW3360 motion: x: {}, y: {}", dx, dy);
 
         Ok(MotionData { dx, dy })
     }
 
-    /// Sign extend a value (equivalent to Zephyr's sign_extend)
-    fn sign_extend(value: u16, bits: usize) -> i16 {
-        let sign_bit = 1 << bits;
-        if value & sign_bit != 0 {
-            (value | !((1 << (bits + 1)) - 1)) as i16
+    pub async fn check_fw_signature(&mut self) -> Result<(), Pmw3360Error> {
+        let product_id = self.read_reg(Register::ProductId).await?;
+        let inverse_product_id = self.read_reg(Register::InverseProductId).await?;
+
+        if product_id == FW_SIG_PID && inverse_product_id == FW_SIG_INV_PID {
+            Ok(())
         } else {
-            value as i16
+            error!(
+                "Firmware signature check failed, expected: {}, {} got: {}, {}",
+                FW_SIG_PID, FW_SIG_INV_PID, product_id, inverse_product_id
+            );
+            Err(Pmw3360Error::InvalidFwSignature((
+                product_id,
+                inverse_product_id,
+            )))
         }
     }
 }
@@ -567,23 +616,23 @@ mod rmk_integration {
         Failed,
     }
 
-    /// PMW3610 as an InputDevice for RMK
+    /// PMW3360 as an InputDevice for RMK
     ///
     /// This device returns `Event::Joystick` events with relative X/Y movement.
     /// Use an `InputProcessor` (e.g., `JoystickProcessor` or `ScrollLayerProcessor`)
     /// to convert these events into `MouseReport` and send to the host.
-    pub struct Pmw3610Device<SPI, CS, MOTION>
+    pub struct Pmw3360Device<'a, SPI, CS, MOTION>
     where
         SPI: SpiBus,
         CS: OutputPin,
         MOTION: InputPin,
     {
-        sensor: Pmw3610<SPI, CS, MOTION>,
+        sensor: Pmw3360<'a, SPI, CS, MOTION>,
         init_state: InitState,
         poll_interval: Duration,
     }
 
-    impl<SPI, CS, MOTION> Pmw3610Device<SPI, CS, MOTION>
+    impl<'a, SPI, CS, MOTION> Pmw3360Device<'a, SPI, CS, MOTION>
     where
         SPI: SpiBus,
         CS: OutputPin,
@@ -591,18 +640,62 @@ mod rmk_integration {
     {
         const MAX_INIT_RETRIES: u8 = 3;
 
-        /// Create a new PMW3610 device for RMK
+        /// Create a new PMW3360 device for RMK
         ///
         /// # Arguments
-        /// - `spi`: SPI bus (use `BitBangSpiBus` for half-duplex bit-banging without hardware support)
+        /// - `spi`: SPI bus
         /// - `cs`: Chip select pin (active low)
         /// - `motion_gpio`: Optional motion interrupt pin (active low)
         /// - `config`: Sensor configuration
-        pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3610Config) -> Self {
+        pub fn new(spi: SPI, cs: CS, motion_gpio: Option<MOTION>, config: Pmw3360Config) -> Self {
             Self {
-                sensor: Pmw3610::new(spi, cs, motion_gpio, config),
+                sensor: Pmw3360::new(spi, cs, motion_gpio, config),
                 init_state: InitState::Pending,
                 poll_interval: Duration::from_micros(500),
+            }
+        }
+
+        /// Create a new PMW3360 device with custom poll interval
+        pub fn with_poll_interval(
+            spi: SPI,
+            cs: CS,
+            motion_gpio: Option<MOTION>,
+            config: Pmw3360Config,
+            poll_interval_us: u64,
+        ) -> Self {
+            Self {
+                sensor: Pmw3360::new(spi, cs, motion_gpio, config),
+                init_state: InitState::Pending,
+                poll_interval: Duration::from_micros(poll_interval_us),
+            }
+        }
+
+        pub fn new_with_firmware(
+            spi: SPI,
+            cs: CS,
+            motion_gpio: Option<MOTION>,
+            config: Pmw3360Config,
+            firmware: &'a [u8],
+        ) -> Self {
+            Self {
+                sensor: Pmw3360::new_with_firmware(spi, cs, motion_gpio, config, firmware),
+                init_state: InitState::Pending,
+                poll_interval: Duration::from_micros(500),
+            }
+        }
+
+        pub fn new_with_firmware_poll_interval(
+            spi: SPI,
+            cs: CS,
+            motion_gpio: Option<MOTION>,
+            config: Pmw3360Config,
+            poll_interval_us: u64,
+            firmware: &'a [u8],
+        ) -> Self {
+            Self {
+                sensor: Pmw3360::new_with_firmware(spi, cs, motion_gpio, config, firmware),
+                init_state: InitState::Pending,
+                poll_interval: Duration::from_micros(poll_interval_us),
             }
         }
 
@@ -617,21 +710,18 @@ mod rmk_integration {
             }
 
             if let InitState::Initializing(retry_count) = self.init_state {
-                info!(
-                    "PMW3610: Initializing sensor (attempt {})",
-                    retry_count + 1
-                );
+                info!("PMW3360: Initializing sensor (attempt {})", retry_count + 1);
 
                 match self.sensor.init().await {
                     Ok(()) => {
-                        info!("PMW3610: Sensor initialized successfully");
+                        info!("PMW3360: Sensor initialized successfully");
                         self.init_state = InitState::Ready;
                         return true;
                     }
                     Err(e) => {
-                        error!("PMW3610: Init failed: {:?}", e);
+                        error!("PMW3360: Init failed: {:?}", e);
                         if retry_count + 1 >= Self::MAX_INIT_RETRIES {
-                            error!("PMW3610: Max retries reached, giving up");
+                            error!("PMW3360: Max retries reached, giving up");
                             self.init_state = InitState::Failed;
                             return false;
                         }
@@ -646,7 +736,7 @@ mod rmk_integration {
         }
     }
 
-    impl<SPI, CS, MOTION> InputDevice for Pmw3610Device<SPI, CS, MOTION>
+    impl<'a, SPI, CS, MOTION> InputDevice for Pmw3360Device<'a, SPI, CS, MOTION>
     where
         SPI: SpiBus,
         CS: OutputPin,
@@ -689,7 +779,7 @@ mod rmk_integration {
                         }
                     }
                     Err(e) => {
-                        warn!("PMW3610 read error: {:?}", e);
+                        warn!("PMW3360 read error: {:?}", e);
                     }
                 }
             }
@@ -698,4 +788,4 @@ mod rmk_integration {
 }
 
 #[cfg(feature = "rmk")]
-pub use rmk_integration::Pmw3610Device;
+pub use rmk_integration::Pmw3360Device;

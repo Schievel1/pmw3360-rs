@@ -1,9 +1,6 @@
-# pmw3610-rs
+# pmw3360-rs
 
-> [!Warning]
-> This implementation has been merged into RMK repository and no longer needed if you are planning to use with RMK.
-
-PixArt PMW3610 Low-Power Mouse Sensor Driver for Rust/Embassy/RMK.
+PixArt PMW3360 Mouse Sensor Driver for Rust/Embassy/RMK.
 
 Ported from the Zephyr driver implementation:
 https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a655245ae1328/drivers/input/input_pmw3610.c
@@ -14,122 +11,75 @@ https://github.com/zephyrproject-rtos/zephyr/blob/d31c6e95033fd6b3763389edba6a65
 
 ```toml
 [dependencies]
-pmw3610-rs = { git = "https://github.com/kot149/pmw3610-rs", branch = "main", features = ["rmk"] }
+pmw3360-rs = { git = "https://github.com/Schievel1/pmw3360-rs", branch = "main", features = ["rmk"] }
 ```
 
 #### Features
 
-- `rmk`: Enables `Pmw3610Device` with `InputDevice` trait for RMK. Also provides implementation of `BidirectionalPin` for rmk's `FlexPin` trait.
-- `embassy-nrf` (optional): Provides a standalone `BidirectionalPin` implementation for `embassy_nrf::gpio::Flex`. Only needed when NOT using the `rmk` feature.
+- `rmk`: Enables `Pmw3360Device` with `InputDevice` trait for RMK.
 
 ### 2. Initialize the sensor
 
 ```rust
-use pmw3610_rs::{BitBangSpiBus, Pmw3610Config, Pmw3610Device};
-use embassy_nrf::gpio::{Flex, Input, Output, Level, Pull, OutputDrive};
+use embassy_rp::gpio::{Input, Output, Level, Pull}; // rp2040 hal as example
+use embassy_rp::spi::{Spi, Config, Polarity, Phase};
+use pmw3360_rs::{Pmw3360Config, Pmw3360Device};
 
-// Initialize PMW3610 mouse sensor
-let pmw3610_config = Pmw3610Config {
-    res_cpi: 800,
-    smart_mode: false,
-    force_awake: false,
+let p = embassy_rp::init(Default::default());
+
+let mut spi_cfg = Config::default();
+// MODE_3 = Polarity::IdleHigh + Phase::CaptureOnSecondTransition
+spi_cfg.polarity = Polarity::IdleHigh;
+spi_cfg.phase = Phase::CaptureOnSecondTransition;
+spi_cfg.frequency = 2_000_000;
+
+ // Create GPIO pins
+ let pmw3360_sck = p.PIN_18;
+ let pmw3360_mosi = p.PIN_19;
+ let pmw3360_miso = p.PIN_16;
+ let pmw3360_cs = Output::new(p.PIN_17, Level::High);
+ let pmw3360_irq = Input::new(p.PIN_20, Pull::Up);
+
+// Create the SPI bus
+let pmw3360_spi = Spi::new(p.SPI0, pmw3360_sck,pmw3360_mosi,pmw3360_miso, p.DMA_CH2, p.DMA_CH3, spi_cfg); // SPI0, DMA_CH2, DMA_CH3 used in this example
+
+// Initialize PMW3360 mouse sensor
+let pmw3360_config = Pmw3360Config {
+    res_cpi: 1600,
+    rot_trans_angle: -15,
+    liftoff_dist: 0x08,
     swap_xy: false,
-    invert_x: false,
+    invert_x: true,
     invert_y: false,
     ..Default::default()
 };
 
-// Create GPIO pins
-let pmw3610_sck = Output::new(p.P0_05, Level::High, OutputDrive::Standard);
-let pmw3610_sdio = Flex::new(p.P0_04);
-let pmw3610_cs = Output::new(p.P0_09, Level::High, OutputDrive::Standard);
-let pmw3610_irq = Input::new(p.P0_02, Pull::Up);
-
-// Create the bit-banging SPI bus
-let pmw3610_spi = BitBangSpiBus::new(pmw3610_sck, pmw3610_sdio);
-
-// Create the sensor device
-let mut pmw3610_device = Pmw3610Device::new(
-    pmw3610_spi, pmw3610_cs, Some(pmw3610_irq), pmw3610_config
-);
+ // Create the sensor device
+ let mut pmw3360_device = Pmw3360Device::new(
+     pmw3360_spi, pmw3360_cs, Some(pmw3360_irq), pmw3360_config
+ );
 
 // Add to the run_devices! macro
 run_devices! (
-    (matrix, pmw3610_device) => EVENT_CHANNEL,
+    (matrix, pmw3310_device) => EVENT_CHANNEL,
 ),
 ```
 
 ### 3. Add an InputProcessor to handle the events
 
-`Pmw3610Device` returns `Event::Joystick` events. You need an `InputProcessor` to convert these into `MouseReport`.
-
-For simple mouse movement, use `JoystickProcessor`:
+`Pmw3360Device` returns `Event::Joystick` events. RMK provides a `Pmw3610Processor` to convert the joystick events to `MouseReport`.
 
 ```rust
-use rmk::input_device::joystick::JoystickProcessor;
-let mut joystick_proc = JoystickProcessor::new([[1, 0], [0, 1]], [0, 0], 1, &keymap);
+use rmk::input_device::pmw3610::Pmw3610Processor;
+
+let mut pmw3360_processor = Pmw3610Processor::new(&keymap);
 
 // Add processor to the chain
-run_processor_chain! {
-    EVENT_CHANNEL => [joystick_proc],
-},
+    run_processor_chain! {
+        EVENT_CHANNEL => [pmw3360_processor],
+    },
 ```
 
-## Custom HAL Implementation
-
-### Using a different HAL with bit-banging
-
-To use with a different HAL, implement the `BidirectionalPin` trait for the SDIO pin.
-Note that with the `rmk` feature is enabled, the `FlexPin` trait is implemented for nRF and RP boards, so you can use it directly without implementing the `BidirectionalPin` trait.
-
-```rust
-use pmw3610_rs::{BidirectionalPin, BitBangSpiBus, Pmw3610, Pmw3610Config};
-
-struct MyFlexPin {
-    // Your pin implementation
-}
-
-impl BidirectionalPin for MyFlexPin {
-    fn set_as_output(&mut self) {
-        // Configure pin as output
-    }
-
-    fn set_as_input(&mut self) {
-        // Configure pin as input
-    }
-
-    fn set_high(&mut self) {
-        // Set pin high
-    }
-
-    fn set_low(&mut self) {
-        // Set pin low
-    }
-
-    fn is_high(&mut self) -> bool {
-        // Read pin state
-        true
-    }
-}
-
-// Then use it with BitBangSpiBus
-let spi_bus = BitBangSpiBus::new(my_sck_pin, my_sdio_pin);
-let sensor = Pmw3610::new(spi_bus, cs_pin, motion_pin, config);
-```
-
-### Using hardware SPI
-
-If your MCU's SPI peripheral supports half-duplex mode, you can use it directly instead of bit-banging:
-
-```rust
-use pmw3610_rs::{Pmw3610, Pmw3610Config};
-use embedded_hal::spi::SpiBus;
-
-// Use your hardware SPI that implements SpiBus
-let hardware_spi = /* your half-duplex capable SPI */;
-let sensor = Pmw3610::new(hardware_spi, cs_pin, motion_pin, config);
-```
-
-## License
+# License
 
 Apache-2.0 (derived from Zephyr driver)
