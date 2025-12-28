@@ -154,6 +154,7 @@ const T_SRX_US: u64 = 20 - T_NCS_SCLK_US;
 const T_SWX_US: u64 = 180 - T_SCLK_NCS_WR_US;
 const T_SCLK_NCS_WR_US: u64 = 35 - T_NCS_SCLK_US;
 const T_BEXIT_US: u64 = 1;
+const T_BRSEP_US: u64 = 15;
 
 // Resolution constants
 const RES_STEP: u16 = 100;
@@ -487,6 +488,9 @@ where
     async fn upload_firmware(&mut self, firmware: &[u8]) -> Result<(), Pmw3360Error> {
         self.write_reg(Register::Config2, 0x00).await?; // disable REST mode
 
+        let srom_id = firmware[1];
+        info!("PMW3360: Uploading SROM firmware with SROM-Id 0x{:02x}", srom_id);
+
         self.write_reg(Register::SromEnable, 0x1d).await?;
         Timer::after(Duration::from_millis(10)).await;
         self.write_reg(Register::SromEnable, 0x18).await?;
@@ -502,18 +506,25 @@ where
         Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
 
         for &byte in firmware {
+            debug!("PMW3360: Uploading srom byte: 0x{:02x}", byte);
             self.spi
                 .write(&[byte])
                 .await
                 .map_err(|_| Pmw3360Error::Spi)?;
-            Timer::after(Duration::from_micros(T_SCLK_NCS_WR_US)).await;
+            Timer::after(Duration::from_micros(T_BRSEP_US)).await;
         }
 
         let _ = self.cs.set_high();
 
-        Timer::after(Duration::from_micros(T_SWX_US)).await;
+        Timer::after(Duration::from_micros(T_BEXIT_US)).await;
 
-        self.read_reg(Register::SromId).await?;
+        let flashed_srom_id = self.read_reg(Register::SromId).await?;
+        if srom_id != flashed_srom_id {
+            error!("PMW3360: SROM Firmware upload failed, expected SROM-Id 0x{:02x}, but got 0x{:02x} from the sensor.", srom_id, flashed_srom_id);
+        } else {
+            info!("PMW3360: Upload successfull, new SROM-Id: 0x{:02x}", flashed_srom_id);
+        }
+
         self.write_reg(Register::Config2, 0x00).await?;
 
         Ok(())
@@ -789,3 +800,7 @@ mod rmk_integration {
 
 #[cfg(feature = "rmk")]
 pub use rmk_integration::Pmw3360Device;
+
+// Local Variables:
+// jinx-local-words: "successfull"
+// End:
